@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
@@ -1241,9 +1241,9 @@ async def coffee_status() -> CoffeeStatusResponse:
 
 
 @app.get("/coffee")
-async def serve_coffee_page() -> FileResponse:
-    """Serve the standalone page that shows the coffee signal (0/1)."""
-    return FileResponse("coffee.html")
+async def serve_coffee_page() -> PlainTextResponse:
+    """Return the coffee signal as raw plain text: just '0' or '1', nothing else."""
+    return PlainTextResponse(content=str(coffee_state.value))
 
 
 @app.post("/admin/upload-excel", response_model=AdminResponse)
