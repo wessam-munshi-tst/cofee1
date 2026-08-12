@@ -607,7 +607,7 @@ class GeminiAudioSession:
             if fc.name == "pour_coffee":
                 coffee_state.trigger()
                 self._log(logging.INFO, "Coffee pour triggered by voice command")
-                result = {"status": "poured", "duration_seconds": COFFEE_POUR_DURATION_SECONDS}
+                result = {"status": "poured", "duration_seconds": coffee_state.duration}
             else:
                 result = {"status": "unknown_tool"}
             function_responses.append(
@@ -1091,11 +1091,15 @@ class CoffeeState:
     """
 
     PHRASES_FILE = Path("coffee_phrases.json")
+    DURATION_FILE = Path("coffee_duration.json")
     DEFAULT_PHRASES: tuple[str, ...] = ("صب القهوة",)
+    MIN_DURATION_SECONDS = 1.0
+    MAX_DURATION_SECONDS = 300.0
 
     def __init__(self) -> None:
         self.active_until: float = 0.0
         self.phrases: list[str] = self._load_phrases()
+        self.duration: float = self._load_duration()
 
     def _load_phrases(self) -> list[str]:
         if self.PHRASES_FILE.exists():
@@ -1122,9 +1126,36 @@ class CoffeeState:
         self._save_phrases()
         logger.info("Coffee trigger phrases updated", extra={"extra": {"count": len(self.phrases)}})
 
-    def trigger(self, duration: float = COFFEE_POUR_DURATION_SECONDS) -> None:
-        """Activate the signal (value becomes 1) for `duration` seconds."""
-        self.active_until = time.time() + duration
+    def _load_duration(self) -> float:
+        if self.DURATION_FILE.exists():
+            try:
+                data = json.loads(self.DURATION_FILE.read_text(encoding="utf-8"))
+                value = float(data.get("duration_seconds"))
+                if self.MIN_DURATION_SECONDS <= value <= self.MAX_DURATION_SECONDS:
+                    return value
+            except Exception as e:
+                logger.error(f"Failed to load coffee duration: {e}")
+        return COFFEE_POUR_DURATION_SECONDS
+
+    def _save_duration(self) -> None:
+        try:
+            self.DURATION_FILE.write_text(
+                json.dumps({"duration_seconds": self.duration}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.error(f"Failed to save coffee duration: {e}")
+
+    def set_duration(self, duration: float) -> None:
+        """Update how long the signal stays at 1 before returning to 0."""
+        clamped = max(self.MIN_DURATION_SECONDS, min(self.MAX_DURATION_SECONDS, duration))
+        self.duration = clamped
+        self._save_duration()
+        logger.info("Coffee pour duration updated", extra={"extra": {"duration_seconds": self.duration}})
+
+    def trigger(self, duration: float | None = None) -> None:
+        """Activate the signal (value becomes 1) for `duration` seconds (defaults to the configured duration)."""
+        self.active_until = time.time() + (duration if duration is not None else self.duration)
 
     @property
     def value(self) -> int:
@@ -1197,6 +1228,18 @@ class CoffeeStatusResponse(BaseModel):
     value: int
 
 
+class CoffeeDurationRequest(BaseModel):
+    """Request model for updating the coffee pour signal duration."""
+    duration_seconds: float = Field(
+        ..., ge=CoffeeState.MIN_DURATION_SECONDS, le=CoffeeState.MAX_DURATION_SECONDS
+    )
+
+
+class CoffeeDurationResponse(BaseModel):
+    """Response model listing the current coffee pour signal duration."""
+    duration_seconds: float
+
+
 @app.post("/admin/show-image", response_model=AdminResponse)
 async def admin_show_image(request: ImageRequest) -> AdminResponse:
     """Send an image URL to be displayed on the index page for 15 seconds."""
@@ -1231,7 +1274,20 @@ async def admin_set_coffee_phrases(request: CoffeePhrasesRequest) -> AdminRespon
 async def admin_trigger_coffee() -> AdminResponse:
     """Manually trigger the coffee-pour signal for testing (bypasses voice)."""
     coffee_state.trigger()
-    return AdminResponse(message="تم تفعيل إشارة صب القهوة لمدة 20 ثانية")
+    return AdminResponse(message=f"تم تفعيل إشارة صب القهوة لمدة {coffee_state.duration:g} ثانية")
+
+
+@app.get("/admin/coffee-duration", response_model=CoffeeDurationResponse)
+async def admin_get_coffee_duration() -> CoffeeDurationResponse:
+    """Get the current coffee pour signal duration (seconds)."""
+    return CoffeeDurationResponse(duration_seconds=coffee_state.duration)
+
+
+@app.post("/admin/coffee-duration", response_model=AdminResponse)
+async def admin_set_coffee_duration(request: CoffeeDurationRequest) -> AdminResponse:
+    """Update how long (in seconds) the coffee signal stays at 1 before returning to 0."""
+    coffee_state.set_duration(request.duration_seconds)
+    return AdminResponse(message=f"تم حفظ مدة الإشارة: {coffee_state.duration:g} ثانية")
 
 
 @app.get("/coffee/status", response_model=CoffeeStatusResponse)

@@ -114,7 +114,7 @@
             <p class="card-description">
                 عندما يقول أي شخص للروبوت إحدى هذه العبارات، ستتحول شاشة
                 <a href="/coffee" target="_blank" rel="noopener">صفحة /coffee</a>
-                من 0 إلى 1 لمدة 20 ثانية ثم تعود تلقائياً إلى 0.
+                من 0 إلى 1 لمدة محددة ثم تعود تلقائياً إلى 0.
                 اكتب كل عبارة في سطر مستقل.
             </p>
             <textarea
@@ -127,6 +127,25 @@
                 <button class="btn btn-toggle" id="coffeeTestBtn">تجربة الإشارة الآن</button>
             </div>
             <p id="coffeeStatus" style="margin-top:8px;font-size:0.9rem;color:#636e72;"></p>
+
+            <hr style="margin:16px 0;border:none;border-top:1px solid #eee;">
+
+            <label for="coffeeDurationInput" style="display:block;margin-bottom:6px;font-size:0.9rem;color:#2d3436;">
+                مدة تحول الإشارة من 0 إلى 1 ثم العودة إلى 0 (بالثواني)
+            </label>
+            <div class="control-buttons" style="align-items:center;">
+                <input
+                    type="number"
+                    id="coffeeDurationInput"
+                    class="form-input"
+                    min="1"
+                    max="300"
+                    step="1"
+                    style="max-width:120px;"
+                    placeholder="20">
+                <button class="btn btn-primary" id="coffeeDurationBtn">حفظ المدة</button>
+            </div>
+            <p id="coffeeDurationStatus" style="margin-top:8px;font-size:0.9rem;color:#636e72;"></p>
         </section>
 
         <!-- Excel Upload -->
@@ -261,6 +280,44 @@
         });
 
         loadCoffeePhrases();
+
+        // Coffee Pour Duration
+        async function loadCoffeeDuration() {
+            try {
+                const res = await fetch('/admin/coffee-duration');
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('coffeeDurationInput').value = data.duration_seconds;
+                }
+            } catch (e) { /* silent */ }
+        }
+
+        document.getElementById('coffeeDurationBtn').addEventListener('click', async () => {
+            const statusEl = document.getElementById('coffeeDurationStatus');
+            const duration_seconds = parseFloat(document.getElementById('coffeeDurationInput').value);
+            if (!duration_seconds || duration_seconds < 1 || duration_seconds > 300) {
+                statusEl.textContent = 'الرجاء إدخال قيمة صحيحة بين 1 و 300 ثانية';
+                statusEl.style.color = '#e17055';
+                return;
+            }
+            statusEl.textContent = 'جاري الحفظ...';
+            statusEl.style.color = '#636e72';
+            try {
+                const res = await fetch('/admin/coffee-duration', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration_seconds })
+                });
+                const data = await res.json();
+                statusEl.textContent = data.message || 'تم الحفظ';
+                statusEl.style.color = data.status === 'error' ? '#e17055' : '#00b894';
+            } catch (e) {
+                statusEl.textContent = 'حدث خطأ أثناء الحفظ';
+                statusEl.style.color = '#e17055';
+            }
+        });
+
+        loadCoffeeDuration();
 
         document.getElementById('uploadExcelBtn').addEventListener('click', async () => {
             const fileInput = document.getElementById('excelFile');
