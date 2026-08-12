@@ -246,7 +246,7 @@ class TenantState:
         self.tenant_id = tenant_id
         self._system_instructions: str = ""
         self._is_muted: bool = False
-        self._current_voice: str = "Zephyr"  # Default voice
+        self._current_voice: str = "Charon"  # Default voice
         self._connections: MutableMapping[WebSocket, asyncio.Queue[dict]] = {}
     
     @property
