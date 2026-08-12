@@ -1079,7 +1079,7 @@ async def tenant_admin_set_instructions(tenant_id: str, request: InstructionsReq
 # IMAGE DISPLAY STATE
 # =============================================================================
 
-COFFEE_POUR_DURATION_SECONDS = 20.0
+COFFEE_POUR_DURATION_SECONDS = 3.0
 
 
 class CoffeeState:
