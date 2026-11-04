@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         description="Gemini model identifier"
     )
     sample_rate: int = Field(default=24000, ge=8000, le=48000)
-    silence_duration_ms: int = Field(default=50, ge=50, le=2000)
+    silence_duration_ms: int = Field(default=300, ge=50, le=2000)
     generation_temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     instruction_file: Path = Field(default=Path("instructions.txt"))
     excel_file: Path = Field(default=Path("employees.xlsx"))
@@ -446,6 +446,10 @@ connection_manager = ConnectionManager()
 # GEMINI AUDIO SESSION
 # =============================================================================
 
+class GeminiGoAway(Exception):
+    """Raised when Gemini announces it will close the connection soon (GoAway)."""
+
+
 class GeminiAudioSession:
     """Encapsulates a single user's audio session with Gemini Live API."""
     
@@ -459,6 +463,8 @@ class GeminiAudioSession:
         self._client_disconnected = False
         self._tasks: list[asyncio.Task] = []
         self._session_start = time.time()
+        # Session resumption handle: lets a reconnect continue the same conversation
+        self._resume_handle: str | None = None
     
     def _log(self, level: int, msg: str, **extra) -> None:
         """Log with session correlation ID."""
@@ -482,6 +488,11 @@ class GeminiAudioSession:
                     self._log(logging.INFO, "Client disconnected")
                     self._client_disconnected = True
                     break
+                
+                # Planned Gemini connection rotation: reconnect immediately, keep context
+                if any(isinstance(exc, GeminiGoAway) for exc in eg.exceptions):
+                    self._log(logging.INFO, "Gemini GoAway received, reconnecting with resumption")
+                    continue
                 
                 for exc in eg.exceptions:
                     if not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
@@ -550,12 +561,18 @@ class GeminiAudioSession:
             ),
             generation_config=types.GenerationConfig(
                 temperature=settings.generation_temperature,
-                thinking_config=types.ThinkingConfig(include_thoughts=False)
+                # thinking_budget=0 turns thinking off -> noticeably faster replies
+                thinking_config=types.ThinkingConfig(thinking_budget=0, include_thoughts=False)
             ),
             system_instruction=types.Content(
                 parts=[types.Part(text=system_text)]
             ),
             tools=[coffee_state.build_tool()],
+            # Without these, Gemini ends the session after ~10-15 minutes and the bot goes deaf
+            session_resumption=types.SessionResumptionConfig(handle=self._resume_handle),
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow()
+            ),
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     silence_duration_ms=settings.silence_duration_ms
@@ -579,6 +596,13 @@ class GeminiAudioSession:
         """Process a single response from Gemini."""
         if self._client_disconnected:
             return
+        
+        update = response.session_resumption_update
+        if update and update.resumable and update.new_handle:
+            self._resume_handle = update.new_handle
+        
+        if response.go_away:
+            raise GeminiGoAway()
         
         if response.tool_call:
             await self._handle_tool_call(response.tool_call, session)
