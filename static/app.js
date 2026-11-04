@@ -54,6 +54,11 @@ const CONFIG = Object.freeze({
     // WebSocket Settings
     RECONNECT_DELAY_MS: 1000,
 
+    // Watchdog: recovers from a stuck microphone / suspended audio
+    WATCHDOG_INTERVAL_MS: 1000,
+    STUCK_PLAYBACK_GRACE_S: 1.0,
+    MIC_RESTART_DELAY_MS: 500,
+
     // UI Settings
     FULLSCREEN_HIDE_DELAY_MS: 10000,
 
@@ -81,7 +86,9 @@ const audioState = {
     processor: null,
     outputAnalyser: null,
     nextStartTime: 0,
-    scheduledSources: []
+    scheduledSources: [],
+    workletLoaded: false,
+    isRestartingMic: false
 };
 
 const visualizerState = {
@@ -171,6 +178,13 @@ async function initializeApplication() {
     // Request microphone access immediately (shows prompt ASAP)
     startAudioCapture();
 
+    // Self-healing: watch for a dead mic, a suspended AudioContext or stuck playback
+    setInterval(audioWatchdog, CONFIG.WATCHDOG_INTERVAL_MS);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // Any touch is a user gesture that Android WebView accepts to resume audio
+    document.addEventListener('touchstart', resumeAudioContext, { passive: true });
+    document.addEventListener('click', resumeAudioContext);
+
     // STT disabled - causes audio mode switching bug on mobile
     // initializeSpeechRecognition();
 }
@@ -248,6 +262,10 @@ function initializeFullscreenButton() {
 // =============================================================================
 
 function connectWebSocket() {
+    const existing = connectionState.websocket;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsPath = TENANT_ID ? `/${TENANT_ID}/ws/audio` : '/ws/audio';
     const wsUrl = `${protocol}//${location.host}${wsPath}`;
@@ -267,9 +285,16 @@ function connectWebSocket() {
     };
 }
 
+let visualizerStarted = false;
+
 function handleWebSocketOpen() {
     console.log('WebSocket connected');
-    drawOutputVisualizer();
+    // Start the animation loop ONCE. Previously every reconnect started another
+    // requestAnimationFrame loop, so the page got slower after each reconnect.
+    if (!visualizerStarted) {
+        visualizerStarted = true;
+        drawOutputVisualizer();
+    }
 }
 
 function handleWebSocketMessage(event) {
@@ -312,6 +337,8 @@ function handleWebSocketClose() {
 
 async function startAudioCapture() {
     try {
+        if (!audioState.context) await initializeAudioContext();
+
         audioState.stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: false,
@@ -324,16 +351,94 @@ async function startAudioCapture() {
             await audioState.context.resume();
         }
 
+        // If Android takes the mic away (app paused, screen off, another app), recover it
+        const track = audioState.stream.getAudioTracks()[0];
+        if (track) {
+            track.onended = () => {
+                console.warn('Mic track ended - restarting capture');
+                restartAudioCapture();
+            };
+        }
+
         audioState.inputSource = audioState.context.createMediaStreamSource(audioState.stream);
         await setupAudioWorklet();
     } catch (error) {
         console.error('Audio capture error:', error);
+        // Retry later instead of staying deaf forever
+        setTimeout(restartAudioCapture, CONFIG.MIC_RESTART_DELAY_MS * 4);
     }
 }
 
+async function restartAudioCapture() {
+    if (audioState.isRestartingMic) return;
+    audioState.isRestartingMic = true;
+    try {
+        try { audioState.inputSource?.disconnect(); } catch (e) { /* ignore */ }
+        try { audioState.processor?.disconnect(); } catch (e) { /* ignore */ }
+        audioState.stream?.getTracks().forEach(t => { t.onended = null; t.stop(); });
+        audioState.stream = null;
+        audioState.inputSource = null;
+        audioState.processor = null;
+
+        await new Promise(r => setTimeout(r, CONFIG.MIC_RESTART_DELAY_MS));
+        await startAudioCapture();
+    } finally {
+        audioState.isRestartingMic = false;
+    }
+}
+
+function resumeAudioContext() {
+    const ctx = audioState.context;
+    if (ctx && ctx.state !== 'running' && ctx.state !== 'closed') {
+        ctx.resume().catch(() => { /* will retry on next watchdog tick */ });
+    }
+}
+
+function isMicAlive() {
+    const track = audioState.stream?.getAudioTracks()[0];
+    return !!track && track.readyState === 'live' && !!audioState.processor;
+}
+
+/**
+ * Runs every second. Fixes the three states that make the bot stop hearing:
+ *  1. AudioContext suspended (WebView paused) -> resume it
+ *  2. Playback "stuck" (onended never fired) -> mic stays blocked forever -> clear it
+ *  3. Mic track dead -> restart capture
+ */
+function audioWatchdog() {
+    const ctx = audioState.context;
+    if (!ctx) return;
+
+    resumeAudioContext();
+
+    if (audioState.scheduledSources.length > 0 &&
+        ctx.state === 'running' &&
+        ctx.currentTime > audioState.nextStartTime + CONFIG.STUCK_PLAYBACK_GRACE_S) {
+        console.warn('Playback queue stuck - clearing so the mic can listen again');
+        stopAudio();
+        connectionState.ignoreIncomingAudio = false;
+    }
+
+    if (!audioState.isRestartingMic && audioState.stream && !isMicAlive()) {
+        console.warn('Mic is not live - restarting capture');
+        restartAudioCapture();
+    }
+}
+
+function handleVisibilityChange() {
+    if (document.visibilityState !== 'visible') return;
+    resumeAudioContext();
+    if (!isMicAlive()) restartAudioCapture();
+    const ws = connectionState.websocket;
+    if (!ws || ws.readyState === WebSocket.CLOSED) connectWebSocket();
+}
+
 async function setupAudioWorklet() {
-    // Use external worklet file for better maintainability
-    await audioState.context.audioWorklet.addModule('/static/pcm-processor.js');
+    // Load the worklet module only once (re-adding it on mic restart throws)
+    if (!audioState.workletLoaded) {
+        await audioState.context.audioWorklet.addModule('/static/pcm-processor.js');
+        audioState.workletLoaded = true;
+    }
 
     const workletNode = new AudioWorkletNode(audioState.context, 'pcm-processor');
     workletNode.port.onmessage = handleAudioWorkletMessage;

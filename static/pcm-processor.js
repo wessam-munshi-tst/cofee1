@@ -8,7 +8,9 @@
 class PCMProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        this.bufferSize = 128;
+        // 1024 samples @ 24kHz ≈ 43ms per message (~23 msg/s instead of ~188 msg/s).
+        // Tiny 128-sample packets flood the WebSocket and the server, causing growing delay.
+        this.bufferSize = 1024;
         this.buffer = new Int16Array(this.bufferSize);
         this.index = 0;
     }
@@ -23,7 +25,9 @@ class PCMProcessor extends AudioWorkletProcessor {
             this.buffer[this.index++] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
 
             if (this.index >= this.bufferSize) {
-                this.port.postMessage(this.buffer);
+                // Transfer ownership (no copy), then start a fresh buffer
+                this.port.postMessage(this.buffer, [this.buffer.buffer]);
+                this.buffer = new Int16Array(this.bufferSize);
                 this.index = 0;
             }
         }
